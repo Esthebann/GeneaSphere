@@ -1,43 +1,56 @@
-'use client'
+"use client";
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState } from "react";
 
-function getToken() {
-  return localStorage.getItem('geneasphere_token') || ''
-}
+const LS_TOKEN = "geneasphere.token";
 
 export default function StatsPage() {
-  const [data, setData] = useState<any>(null)
-  const [msg, setMsg] = useState('')
+  const [token, setToken] = useState("");
+  const [json, setJson] = useState<any>(null);
+  const [err, setErr] = useState("");
 
   useEffect(() => {
-    const t = getToken()
+    const t = localStorage.getItem(LS_TOKEN) ?? "";
     if (!t) {
-      window.location.href = '/login'
-      return
+      window.location.replace("/login");
+      return;
     }
-    fetch('/api/stats', { headers: { Authorization: 'Bearer ' + t } })
-      .then(r => r.json())
-      .then(j => {
-        if (j.error) setMsg(j.error)
-        else setData(j)
-      })
-      .catch(() => setMsg('NETWORK_ERROR'))
-  }, [])
+    setToken(t);
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    (async () => {
+      setErr("");
+      const res = await fetch("/api/stats", {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok) {
+        setErr(j?.error ?? "Error");
+        setJson(null);
+        return;
+      }
+      setJson(j);
+    })();
+  }, [token]);
 
   return (
-    <div style={{ padding: 16, maxWidth: 900, margin: '0 auto' }}>
-      <h1>Statistiques</h1>
-      {msg ? <div style={{ color: 'crimson', marginTop: 8 }}>{msg}</div> : null}
-      {data ? (
-        <div style={{ display: 'grid', gap: 10, marginTop: 12 }}>
-          <div>Total membres: <b>{data.totalMembers}</b></div>
-          <div>Hommes: <b>{data.men}</b> Femmes: <b>{data.women}</b> Autre: <b>{data.other}</b></div>
-          <div>Espérance de vie moyenne: <b>{data.avgLifeExpectancyYears ? data.avgLifeExpectancyYears.toFixed(1) + ' ans' : 'n/a'}</b></div>
-          <div>Générations: <b>{data.generations}</b></div>
-          <div>Enfants moyens par génération: <b>{data.avgChildrenPerGeneration ? data.avgChildrenPerGeneration.toFixed(2) : 'n/a'}</b></div>
-        </div>
-      ) : null}
+    <div style={{ minHeight: "100vh", background: "#050505", color: "#ddd", padding: 16, fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <div style={{ fontWeight: 900, fontSize: 18 }}>Stats</div>
+        <a href="/tree" style={{ color: "#9db7ff", textDecoration: "none" }}>← Retour arbre</a>
+      </div>
+
+      {err ? <div style={{ marginTop: 12, color: "#ff6b6b" }}>{err}</div> : null}
+
+      <div style={{ marginTop: 14, border: "1px solid #222", borderRadius: 14, background: "#0b0b0b", padding: 14 }}>
+        <div style={{ fontSize: 12, color: "#aaa", marginBottom: 8 }}>Réponse brute /api/stats</div>
+        <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "#ddd" }}>
+{JSON.stringify(json, null, 2)}
+        </pre>
+      </div>
     </div>
-  )
+  );
 }

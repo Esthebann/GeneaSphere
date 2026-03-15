@@ -1,144 +1,123 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { requireAuth } from '@/server/middlewares/authGuard'
-import { connectDb } from '@/server/db/mongoose'
-import { UserModel } from '@/server/models/User'
-import { MemberModel } from '@/server/models/Member'
-import { UnionModel } from '@/server/models/Union'
-import mongoose from 'mongoose'
-
-type Role = 'PENDING' | 'USER' | 'ADMIN'
-
-function isReadableMember(m: any, userId: string, role: Role) {
-  if (!m) return false
-  if (m.visibility === 'PUBLIC') return true
-  if (role === 'ADMIN') return true
-  return String(m.ownerUserId) === String(userId)
-}
+import { NextRequest } from "next/server";
+import { connectDb } from "@/lib/db";
+import { requireAuth } from "@/lib/middleware";
+import { jsonOk } from "@/lib/http";
+import { Member } from "@/models/Member";
+import { Union } from "@/models/Union";
 
 export async function GET(req: NextRequest) {
-  try {
-    const auth = requireAuth(req)
-    const role = auth.role as Role
+  const auth = await requireAuth(req);
+  if (!auth.ok) return auth.res;
 
-    await connectDb()
+  await connectDb();
 
-    const user = await UserModel.findById(auth.userId).lean()
-    if (!user) return NextResponse.json({ error: 'NOT_FOUND' }, { status: 404 })
-    if (!user.profileMemberId) return NextResponse.json({ error: 'NO_PROFILE_MEMBER' }, { status: 400 })
+  const memberMatch =
+    auth.user.role === "ADMIN"
+      ? {}
+      : {
+          $or: [{ visibility: "PUBLIC" }, { createdBy: auth.user.userId }],
+        };
 
-    const rootId = String(user.profileMemberId)
+  const membersAgg = await Member.aggregate([
+    { $match: memberMatch },
+    {
+      $facet: {
+        total: [{ $count: "value" }],
+        sex: [{ $group: { _id: "$sex", value: { $sum: 1 } } }],
+        avgChildren: [
+          { $project: { unionsCount: { $size: { $ifNull: ["$unions", []] } } } },
+          { $group: { _id: null, value: { $avg: "$unionsCount" } } },
+        ],
+        lifeExpectancy: [
+          {
+            $match: {
+              birthDate: { $type: "date" },
+              deathDate: { $type: "date" },
+            },
+          },
+          {
+            $project: {
+              years: {
+                $divide: [{ $subtract: ["$deathDate", "$birthDate"] }, 1000 * 60 * 60 * 24 * 365.25],
+              },
+            },
+          },
+          { $group: { _id: null, value: { $avg: "$years" } } },
+        ],
+      },
+    },
+  ]);
 
-    const allMembers = await MemberModel.find({}).lean()
-    const readable = allMembers.filter(m => isReadableMember(m, auth.userId, role))
+  const totalMembers = membersAgg?.[0]?.total?.[0]?.value ?? 0;
 
-    const total = readable.length
-    const men = readable.filter(m => m.sex === 'M').length
-    const women = readable.filter(m => m.sex === 'F').length
-    const other = total - men - women
+  const sexCounts = membersAgg?.[0]?.sex ?? [];
+  const men = sexCounts.find((x: any) => x._id === "M")?.value ?? 0;
+  const women = sexCounts.find((x: any) => x._id === "F")?.value ?? 0;
 
-    const lifeRows = readable
-      .filter(m => m.birthDate && m.deathDate)
-      .map(m => {
-        const b = new Date(m.birthDate).getTime()
-        const d = new Date(m.deathDate).getTime()
-        const years = (d - b) / (1000 * 60 * 60 * 24 * 365.25)
-        return Number.isFinite(years) && years > 0 && years < 140 ? years : null
-      })
-      .filter(x => typeof x === 'number') as number[]
+  const avgChildren = membersAgg?.[0]?.avgChildren?.[0]?.value ?? 0;
+  const lifeExpectancy = membersAgg?.[0]?.lifeExpectancy?.[0]?.value ?? 0;
 
-    const avgLife = lifeRows.length ? lifeRows.reduce((a, b) => a + b, 0) / lifeRows.length : null
+  const unions = await Union.find({ treeId: auth.user.treeId }, { partners: 1, children: 1 }).lean();
 
-    const unions = await UnionModel.find({}).lean()
+  const allowedMemberIds =
+    auth.user.role === "ADMIN"
+      ? null
+      : new Set(
+          (
+            await Member.find(memberMatch, { _id: 1 }).lean()
+          ).map((m: any) => m._id.toString())
+        );
 
-    const childLinks: Array<{ parent: string; child: string }> = []
-    const partnerLinks: Array<{ member: string; union: string }> = []
+  const filteredUnions = unions.filter((u: any) => {
+    const partnersOk = (u.partners || []).every((p: any) => (allowedMemberIds ? allowedMemberIds.has(p.toString()) : true));
+    const childrenOk = (u.children || []).every((c: any) => (allowedMemberIds ? allowedMemberIds.has(c.toString()) : true));
+    return partnersOk && childrenOk;
+  });
 
-    for (const u of unions as any[]) {
-      const uid = String(u._id)
-      for (const p of (u.partners || [])) partnerLinks.push({ member: String(p), union: uid })
-      for (const c of (u.children || [])) childLinks.push({ parent: uid, child: String(c.childMemberId) })
-    }
+  let totalChildren = 0;
+  for (const u of filteredUnions) totalChildren += (u.children || []).length;
 
-    const partnersByUnion = new Map<string, string[]>()
-    for (const pl of partnerLinks) {
-      const arr = partnersByUnion.get(pl.union) || []
-      arr.push(pl.member)
-      partnersByUnion.set(pl.union, arr)
-    }
+  const avgChildrenPerUnion = filteredUnions.length ? totalChildren / filteredUnions.length : 0;
 
-    const childrenByUnion = new Map<string, string[]>()
-    for (const cl of childLinks) {
-      const arr = childrenByUnion.get(cl.parent) || []
-      arr.push(cl.child)
-      childrenByUnion.set(cl.parent, arr)
-    }
+  const memberMap = new Map<string, { parentUnion: string | null }>();
+  const memberDocs = await Member.find(memberMatch, { parentUnion: 1 }).lean();
+  for (const m of memberDocs) memberMap.set(m._id.toString(), { parentUnion: m.parentUnion ? m.parentUnion.toString() : null });
 
-    const unionsByPartner = new Map<string, string[]>()
-    for (const pl of partnerLinks) {
-      const arr = unionsByPartner.get(pl.member) || []
-      arr.push(pl.union)
-      unionsByPartner.set(pl.member, arr)
-    }
+  const roots = [...memberMap.entries()].filter(([, v]) => !v.parentUnion).map(([id]) => id);
 
-    const gen = new Map<string, number>()
-    gen.set(rootId, 0)
+  const unionChildren = new Map<string, string[]>();
+  for (const u of filteredUnions) unionChildren.set((u as any)._id.toString(), (u.children || []).map((c: any) => c.toString()));
 
-    const q: string[] = [rootId]
-    const seen = new Set<string>([rootId])
+  let generations = 0;
+  let frontier = roots;
+  const seen = new Set<string>(frontier);
 
-    while (q.length) {
-      const cur = q.shift() as string
-      const g = gen.get(cur) ?? 0
-      const uids = unionsByPartner.get(cur) || []
-      for (const uid of uids) {
-        const kids = childrenByUnion.get(uid) || []
-        for (const kid of kids) {
-          if (!gen.has(kid)) gen.set(kid, g + 1)
-          if (!seen.has(kid)) {
-            seen.add(kid)
-            q.push(kid)
+  while (frontier.length) {
+    generations += 1;
+    const next: string[] = [];
+    for (const mid of frontier) {
+      for (const u of filteredUnions) {
+        const partners = (u.partners || []).map((p: any) => p.toString());
+        if (!partners.includes(mid)) continue;
+        const children = (u.children || []).map((c: any) => c.toString());
+        for (const cid of children) {
+          if (!seen.has(cid)) {
+            seen.add(cid);
+            next.push(cid);
           }
         }
       }
-      if (seen.size > 800) break
     }
-
-    const maxGen = gen.size ? Math.max(...Array.from(gen.values())) : 0
-    const generations = maxGen + 1
-
-    const childrenPerGen = new Map<number, number>()
-    const unionsCountPerGen = new Map<number, number>()
-
-    for (const [uid, kids] of childrenByUnion.entries()) {
-      const parents = partnersByUnion.get(uid) || []
-      const parentGens = parents.map(pid => gen.get(pid)).filter(x => typeof x === 'number') as number[]
-      if (!parentGens.length) continue
-      const ug = Math.min(...parentGens)
-      childrenPerGen.set(ug, (childrenPerGen.get(ug) || 0) + kids.length)
-      unionsCountPerGen.set(ug, (unionsCountPerGen.get(ug) || 0) + 1)
-    }
-
-    const genKeys = Array.from(childrenPerGen.keys()).sort((a, b) => a - b)
-    const avgChildrenPerGen = genKeys.length
-      ? genKeys.reduce((acc, g) => acc + (childrenPerGen.get(g)! / Math.max(1, unionsCountPerGen.get(g) || 1)), 0) / genKeys.length
-      : null
-
-    return NextResponse.json(
-      {
-        rootMemberId: rootId,
-        totalMembers: total,
-        men,
-        women,
-        other,
-        avgLifeExpectancyYears: avgLife,
-        generations,
-        avgChildrenPerGeneration: avgChildrenPerGen
-      },
-      { status: 200 }
-    )
-  } catch (e: any) {
-    const msg = String(e?.message || 'BAD_REQUEST')
-    if (msg === 'UNAUTHORIZED') return NextResponse.json({ error: msg }, { status: 401 })
-    return NextResponse.json({ error: msg }, { status: 400 })
+    frontier = next;
   }
+
+  return jsonOk({
+    totalMembers,
+    men,
+    women,
+    avgUnionsPerMember: avgChildren,
+    avgChildrenPerUnion,
+    lifeExpectancyYears: lifeExpectancy,
+    generations,
+  });
 }

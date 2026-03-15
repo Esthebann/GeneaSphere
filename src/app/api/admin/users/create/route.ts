@@ -1,25 +1,45 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { requireAdmin } from '@/server/middlewares/authGuard'
-import { createUserSchema } from '@/server/validators/adminValidators'
-import { createUserAsAdmin } from '@/server/services/adminUsersService'
+import { NextRequest } from "next/server";
+import { z } from "zod";
+import { connectDb } from "@/lib/db";
+import { requireAuth } from "@/lib/auth";
+import { User } from "@/models/User";
+import { hashPassword } from "@/lib/password";
+import { jsonCreated, jsonError } from "@/lib/http";
+
+const bodySchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  role: z.enum(["ADMIN", "USER"]).default("USER"),
+  isValidated: z.boolean().default(true),
+});
 
 export async function POST(req: NextRequest) {
-  try {
-    requireAdmin(req)
-    const body = await req.json()
-    const parsed = createUserSchema.parse(body)
+  const auth = await requireAuth(req);
+  if (!auth.ok) return jsonError(auth.error, auth.status);
+  if (auth.user.role !== "ADMIN") return jsonError("Forbidden", 403);
 
-    const created = await createUserAsAdmin(parsed.email, parsed.password, parsed.role)
-    return NextResponse.json(created, { status: 201 })
-  } catch (e: any) {
-    const msg = String(e?.message || 'BAD_REQUEST')
+  const parsed = bodySchema.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return jsonError("Invalid body", 400);
 
-    if (msg.includes('E11000')) {
-      return NextResponse.json({ error: 'EMAIL_ALREADY_EXISTS' }, { status: 409 })
-    }
+  await connectDb();
 
-    if (msg === 'UNAUTHORIZED') return NextResponse.json({ error: msg }, { status: 401 })
-    if (msg === 'FORBIDDEN') return NextResponse.json({ error: msg }, { status: 403 })
-    return NextResponse.json({ error: msg }, { status: 400 })
-  }
+  const email = parsed.data.email.toLowerCase().trim();
+  const existing = await User.findOne({ email }).lean();
+  if (existing) return jsonError("Email already used", 409);
+
+  const passwordHash = await hashPassword(parsed.data.password);
+
+  const created = await User.create({
+    email,
+    passwordHash,
+    role: parsed.data.role,
+    isValidated: parsed.data.isValidated,
+  });
+
+  return jsonCreated({
+    id: created._id.toString(),
+    email: created.email,
+    role: created.role,
+    isValidated: created.isValidated,
+  });
 }

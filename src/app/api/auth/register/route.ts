@@ -1,22 +1,49 @@
-import { NextResponse } from 'next/server'
-import { registerSchema } from '@/server/validators/authValidators'
-import { registerUser } from '@/server/services/authService'
+import { connectDb } from "@/lib/db";
+import { User } from "@/models/User";
+import { Tree } from "@/models/Tree";
+import { hashPassword } from "@/lib/password";
+import { jsonCreated, jsonError } from "@/lib/http";
+import { z } from "zod";
+
+const bodySchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+});
 
 export async function POST(req: Request) {
-  try {
-    const json = await req.json()
-    const data = registerSchema.parse(json)
+  const body = await req.json().catch(() => null);
+  const parsed = bodySchema.safeParse(body);
+  if (!parsed.success) return jsonError("Invalid input", 400);
 
-    const created = await registerUser(data.email, data.password)
+  await connectDb();
 
-    return NextResponse.json(created, { status: 201 })
-  } catch (e: any) {
-    const msg = String(e?.message || 'BAD_REQUEST')
+  const email = parsed.data.email.toLowerCase().trim();
+  const exists = await User.findOne({ email }).lean();
+  if (exists) return jsonError("Email already used", 409);
 
-    if (msg.includes('E11000')) {
-      return NextResponse.json({ error: 'EMAIL_ALREADY_EXISTS' }, { status: 409 })
-    }
+  const admins = await User.countDocuments({ role: "ADMIN" });
+  const isFirstAdmin = admins === 0;
 
-    return NextResponse.json({ error: msg }, { status: 400 })
-  }
+  const passwordHash = await hashPassword(parsed.data.password);
+
+  const user = await User.create({
+    email,
+    passwordHash,
+    role: isFirstAdmin ? "ADMIN" : "USER",
+    isValidated: isFirstAdmin ? true : false,
+  });
+
+  const tree = await Tree.create({
+    name: "My tree",
+    createdBy: user._id,
+  });
+
+  user.treeId = tree._id;
+  await user.save();
+
+  return jsonCreated({
+    userId: user._id.toString(),
+    role: user.role,
+    isValidated: user.isValidated,
+  });
 }
