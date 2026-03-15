@@ -1,0 +1,276 @@
+export type Mode = 'both' | 'ancestors' | 'descendants'
+
+export type GraphNode = {
+  id: string
+  type: 'MEMBER' | 'UNION'
+  label?: string
+  sex?: string
+  visibility?: string
+  status?: string
+}
+
+export type GraphLink = {
+  source: string
+  target: string
+  type: 'PARTNER' | 'CHILD'
+  linkType?: 'BIOLOGICAL' | 'ADOPTED' | 'FOSTER' | string
+}
+
+export type Graph = {
+  rootMemberId: string
+  nodes: GraphNode[]
+  links: GraphLink[]
+}
+
+export type Pos = { x: number; y: number }
+
+export type LayoutOpts = {
+  yGapGen: number
+  xGapMember: number
+  xGapChild: number
+  coupleGap: number
+  minGap: number
+  maxIter?: number
+}
+
+function buildIndex(graph: Graph) {
+  const nodeById = new Map<string, GraphNode>()
+  for (const n of graph.nodes) nodeById.set(n.id, n)
+  return nodeById
+}
+
+function computeLayersUnionCentric(graph: Graph, focusId: string, mode: Mode) {
+  const nodeById = buildIndex(graph)
+
+  // adjacency (weighted) that respects direction:
+  // PARTNER: MEMBER <-> UNION (0)
+  // CHILD: UNION -> MEMBER (+1), MEMBER -> UNION (-1)
+  const adj = new Map<string, Array<{ to: string; w: number }>>()
+  for (const n of graph.nodes) adj.set(n.id, [])
+
+  for (const l of graph.links) {
+    if (!adj.has(l.source)) adj.set(l.source, [])
+    if (!adj.has(l.target)) adj.set(l.target, [])
+    if (l.type === 'PARTNER') {
+  // PARTNER relie MEMBER -> UNION : on met UNION 1 couche sous le membre
+  adj.get(l.source)!.push({ to: l.target, w: +1, kind: 'partner' })
+  adj.get(l.target)!.push({ to: l.source, w: -1, kind: 'partner' })
+} else {
+  // CHILD relie UNION -> MEMBER : enfant 1 couche sous l'union
+  adj.get(l.source)!.push({ to: l.target, w: +1, kind: 'child' })
+  adj.get(l.target)!.push({ to: l.source, w: -1, kind: 'child' })
+})
+      // CHILD -> UNION (for ancestors)
+      adj.get(l.target)!.push({ to: l.source, w: -1 })
+    }
+  }
+
+  const allow = (w: number) => {
+    if (mode === 'both') return true
+    if (mode === 'descendants') return w >= 0
+    if (mode === 'ancestors') return w <= 0
+    return true
+  }
+
+  const layer = new Map<string, number>()
+  const q: string[] = []
+  const inQ = new Set<string>()
+
+  const start = nodeById.has(focusId) ? focusId : graph.rootMemberId
+  layer.set(start, 0)
+  q.push(start)
+  inQ.add(start)
+
+  // relaxation (stable enough)
+  while (q.length) {
+    const u = q.shift()!
+    inQ.delete(u)
+    const du = layer.get(u) ?? 0
+    for (const e of adj.get(u) || []) {
+      if (!allow(e.w)) continue
+      const v = e.to
+      const cand = du + e.w
+      if (!layer.has(v)) {
+        layer.set(v, cand)
+        if (!inQ.has(v)) { q.push(v); inQ.add(v) }
+      } else {
+        const cur = layer.get(v)!
+        // prefer closer to 0
+        if (cand !== cur && Math.abs(cand) < Math.abs(cur)) {
+          layer.set(v, cand)
+          if (!inQ.has(v)) { q.push(v); inQ.add(v) }
+        }
+      }
+    }
+  }
+
+  // normalize min->0
+  let minL = 0
+  for (const v of layer.values()) minL = Math.min(minL, v)
+  if (minL !== 0) {
+    for (const [id, v] of layer.entries()) layer.set(id, v - minL)
+  }
+
+  // fill missing
+  const base = layer.get(start) ?? 0
+  for (const n of graph.nodes) if (!layer.has(n.id)) layer.set(n.id, base)
+
+  return layer
+}
+
+function pack1D(ids: string[], x: Map<string, number>, minGap: number) {
+  ids.sort((a, b) => (x.get(a) ?? 0) - (x.get(b) ?? 0))
+  let cur = -Infinity
+  for (const id of ids) {
+    const xi = x.get(id) ?? 0
+    if (xi < cur + minGap) x.set(id, cur + minGap)
+    cur = x.get(id) ?? 0
+  }
+}
+
+function centerLayer(ids: string[], x: Map<string, number>) {
+  if (!ids.length) return
+  const xs = ids.map(id => x.get(id) ?? 0)
+  const avg = xs.reduce((a, b) => a + b, 0) / xs.length
+  for (const id of ids) x.set(id, (x.get(id) ?? 0) - avg)
+}
+
+export function layoutStrict(
+  graph: Graph,
+  focusId: string,
+  mode: Mode,
+  opts: LayoutOpts
+): Map<string, Pos> {
+  const { yGapGen, xGapMember, xGapChild, coupleGap, minGap } = opts
+  const nodeById = buildIndex(graph)
+  const layer = computeLayersUnionCentric(graph, focusId, mode)
+
+  // maps
+  const partnersByUnion = new Map<string, string[]>()
+  const childrenByUnion = new Map<string, string[]>()
+  const unionsByChild = new Map<string, string[]>()
+
+  for (const n of graph.nodes) {
+    if (n.type === 'UNION') {
+      partnersByUnion.set(n.id, [])
+      childrenByUnion.set(n.id, [])
+    }
+    unionsByChild.set(n.id, [])
+  }
+
+  for (const l of graph.links) {
+    if (l.type === 'PARTNER') {
+      const u = l.target
+      const p = l.source
+      if (!partnersByUnion.has(u)) partnersByUnion.set(u, [])
+      partnersByUnion.get(u)!.push(p)
+    } else {
+      const u = l.source
+      const c = l.target
+      if (!childrenByUnion.has(u)) childrenByUnion.set(u, [])
+      childrenByUnion.get(u)!.push(c)
+      if (!unionsByChild.has(c)) unionsByChild.set(c, [])
+      unionsByChild.get(c)!.push(u)
+    }
+  }
+
+  // group ids by layer
+  const layers = new Map<number, string[]>()
+  let maxL = 0
+  for (const n of graph.nodes) {
+    const l = layer.get(n.id) ?? 0
+    maxL = Math.max(maxL, l)
+    if (!layers.has(l)) layers.set(l, [])
+    layers.get(l)!.push(n.id)
+  }
+
+  // x init
+  const x = new Map<string, number>()
+  for (const [l, ids] of layers.entries()) {
+    ids.sort((a, b) => a.localeCompare(b))
+    ids.forEach((id, i) => x.set(id, i * xGapMember))
+    centerLayer(ids, x)
+  }
+
+  // --- union-centric pass: place UNIONs first, then force partners around, then kids under
+  for (let l = 0; l <= maxL; l++) {
+    const ids = layers.get(l) || []
+    const unions = ids.filter(id => nodeById.get(id)?.type === 'UNION')
+    const members = ids.filter(id => nodeById.get(id)?.type === 'MEMBER')
+
+    // 1) order unions by current x and pack
+    unions.sort((a, b) => (x.get(a) ?? 0) - (x.get(b) ?? 0))
+    pack1D(unions, x, minGap * 1.2)
+
+    // 2) force partners around union
+    for (const u of unions) {
+      const ps = partnersByUnion.get(u) || []
+      if (ps.length === 0) continue
+      const ux = x.get(u) ?? 0
+      if (ps.length === 1) {
+        x.set(ps[0], ux - coupleGap / 2)
+      } else {
+        // keep first 2 partners visibly as a couple
+        x.set(ps[0], ux - coupleGap / 2)
+        x.set(ps[1], ux + coupleGap / 2)
+        // extra partners: spread near union
+        for (let i = 2; i < ps.length; i++) {
+          x.set(ps[i], ux + (i - 1) * (minGap * 0.9))
+        }
+      }
+    }
+
+    // 3) nudge members to avoid overlaps in the layer
+    members.sort((a, b) => (x.get(a) ?? 0) - (x.get(b) ?? 0))
+    pack1D(members, x, minGap)
+
+    // keep whole layer centered
+    centerLayer(ids, x)
+    layers.set(l, ids)
+  }
+
+  // --- children alignment pass: place each child near avg(parent unions)
+  for (let pass = 0; pass < 3; pass++) {
+    for (let l = 1; l <= maxL; l++) {
+      const ids = layers.get(l) || []
+      for (const id of ids) {
+        if (nodeById.get(id)?.type !== 'MEMBER') continue
+        const parents = unionsByChild.get(id) || []
+        if (!parents.length) continue
+        const avg = parents.map(u => x.get(u) ?? 0).reduce((a, b) => a + b, 0) / parents.length
+        const cur = x.get(id) ?? 0
+        // smooth move
+        x.set(id, cur * 0.4 + avg * 0.6)
+      }
+      pack1D(ids, x, minGap)
+      centerLayer(ids, x)
+    }
+  }
+
+  // positions
+  const pos = new Map<string, Pos>()
+  for (const n of graph.nodes) {
+    const l = layer.get(n.id) ?? 0
+    pos.set(n.id, { x: x.get(n.id) ?? 0, y: l * yGapGen })
+  }
+
+  // final: union.x must be avg(partners.x)
+  for (const [u, ps] of partnersByUnion.entries()) {
+    if (!ps.length) continue
+    const xs = ps.map(p => pos.get(p)?.x).filter((v): v is number => typeof v === 'number')
+    if (!xs.length) continue
+    const avg = xs.reduce((a, b) => a + b, 0) / xs.length
+    const p = pos.get(u)
+    if (p) pos.set(u, { x: avg, y: p.y })
+  }
+
+  // center focus at 0,0
+  const f = pos.get(focusId) || pos.get(graph.rootMemberId)
+  if (f) {
+    for (const [id, p] of pos.entries()) {
+      pos.set(id, { x: p.x - f.x, y: p.y - f.y })
+    }
+  }
+
+  return pos
+}

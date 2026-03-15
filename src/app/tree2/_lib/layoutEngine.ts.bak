@@ -1,0 +1,364 @@
+export type Mode = 'both' | 'ancestors' | 'descendants'
+
+export type GraphNode = {
+  id: string
+  type: 'MEMBER' | 'UNION'
+  label?: string
+  sex?: string
+  visibility?: string
+  status?: string
+}
+
+export type GraphLink = {
+  source: string
+  target: string
+  type: 'PARTNER' | 'CHILD'
+  linkType?: 'BIOLOGICAL' | 'ADOPTED' | 'FOSTER' | string
+}
+
+export type Graph = {
+  rootMemberId: string
+  nodes: GraphNode[]
+  links: GraphLink[]
+}
+
+export type Pos = { x: number; y: number }
+
+export type LayoutOpts = {
+  yGapGen: number
+  xGapMember: number
+  xGapChild: number
+  coupleGap: number
+  minGap: number
+  maxIter?: number
+}
+
+function buildIndex(graph: Graph) {
+  const nodeById = new Map<string, GraphNode>()
+  for (const n of graph.nodes) nodeById.set(n.id, n)
+  return nodeById
+}
+
+function buildUnions(graph: Graph) {
+  const partnersByUnion = new Map<string, string[]>()
+  const childrenByUnion = new Map<string, { id: string; linkType?: string }[]>()
+
+  for (const n of graph.nodes) {
+    if (n.type === 'UNION') {
+      partnersByUnion.set(n.id, [])
+      childrenByUnion.set(n.id, [])
+    }
+  }
+
+  for (const l of graph.links) {
+    if (l.type === 'PARTNER') {
+      const u = String(l.target)
+      const p = String(l.source)
+      if (!partnersByUnion.has(u)) partnersByUnion.set(u, [])
+      partnersByUnion.get(u)!.push(p)
+    } else if (l.type === 'CHILD') {
+      const u = String(l.source)
+      const c = String(l.target)
+      if (!childrenByUnion.has(u)) childrenByUnion.set(u, [])
+      childrenByUnion.get(u)!.push({ id: c, linkType: l.linkType })
+    }
+  }
+
+  // normalize order (stable)
+  for (const [u, ps] of partnersByUnion.entries()) {
+    partnersByUnion.set(u, [...new Set(ps)].sort((a, b) => a.localeCompare(b)))
+  }
+  for (const [u, cs] of childrenByUnion.entries()) {
+    const uniq = new Map<string, { id: string; linkType?: string }>()
+    for (const c of cs) if (!uniq.has(c.id)) uniq.set(c.id, c)
+    childrenByUnion.set(u, [...uniq.values()].sort((a, b) => a.id.localeCompare(b.id)))
+  }
+
+  return { partnersByUnion, childrenByUnion }
+}
+
+/**
+ * Compute generation for MEMBERS only.
+ * - partners of a union are same generation (0)
+ * - parent -> child is +1 (parent generation + 1)
+ * We do SPFA-like relaxation from focus.
+ */
+function computeMemberGen(graph: Graph, focusId: string, mode: Mode) {
+  const nodeById = buildIndex(graph)
+  const { partnersByUnion, childrenByUnion } = buildUnions(graph)
+
+  const members = graph.nodes.filter(n => n.type === 'MEMBER').map(n => n.id)
+  const adj = new Map<string, Array<{ to: string; w: number }>>()
+  for (const m of members) adj.set(m, [])
+
+  // partner edges (member<->member) via UNION partners
+  for (const [u, ps] of partnersByUnion.entries()) {
+    if (ps.length < 2) continue
+    for (let i = 0; i < ps.length; i++) {
+      for (let j = i + 1; j < ps.length; j++) {
+        const a = ps[i], b = ps[j]
+        if (!adj.has(a)) adj.set(a, [])
+        if (!adj.has(b)) adj.set(b, [])
+        adj.get(a)!.push({ to: b, w: 0 })
+        adj.get(b)!.push({ to: a, w: 0 })
+      }
+    }
+  }
+
+  // parent-child edges: each partner is parent of each child
+  for (const [u, ps] of partnersByUnion.entries()) {
+    const cs = childrenByUnion.get(u) || []
+    for (const p of ps) {
+      if (!adj.has(p)) adj.set(p, [])
+      for (const c of cs) {
+        if (!adj.has(c.id)) adj.set(c.id, [])
+        adj.get(p)!.push({ to: c.id, w: +1 })
+        adj.get(c.id)!.push({ to: p, w: -1 })
+      }
+    }
+  }
+
+  const allowW = (w: number) => {
+    if (mode === 'both') return true
+    if (mode === 'descendants') return w >= 0
+    if (mode === 'ancestors') return w <= 0
+    return true
+  }
+
+  const start = nodeById.has(focusId) ? focusId : graph.rootMemberId
+  const gen = new Map<string, number>()
+  const inQ = new Set<string>()
+  const q: string[] = []
+  gen.set(start, 0)
+  q.push(start); inQ.add(start)
+
+  while (q.length) {
+    const u = q.shift()!
+    inQ.delete(u)
+    const du = gen.get(u)!
+    const neigh = adj.get(u) || []
+    for (const e of neigh) {
+      if (!allowW(e.w)) continue
+      const v = e.to
+      const cand = du + e.w
+      if (!gen.has(v)) {
+        gen.set(v, cand)
+        if (!inQ.has(v)) { q.push(v); inQ.add(v) }
+      } else {
+        const cur = gen.get(v)!
+        // keep nearer solution to focus (stability)
+        if (cur !== cand && Math.abs(cand) < Math.abs(cur)) {
+          gen.set(v, cand)
+          if (!inQ.has(v)) { q.push(v); inQ.add(v) }
+        }
+      }
+    }
+  }
+
+  // normalize min to 0
+  let minG = 0
+  for (const v of gen.values()) minG = Math.min(minG, v)
+  if (minG !== 0) {
+    for (const [id, v] of gen.entries()) gen.set(id, v - minG)
+  }
+
+  // default missing members (same gen as start)
+  const base = gen.get(start) ?? 0
+  for (const m of members) if (!gen.has(m)) gen.set(m, base)
+
+  return gen
+}
+
+/**
+ * FAMILY BLOCK LAYOUT
+ * Layers:
+ * - MEMBER at integer generation g
+ * - UNION at g + 0.5 (between partners and children)
+ * Horizontal:
+ * - Partners + union form a "couple block"
+ * - Children of same union form a "sib block"
+ * - We reorder blocks by barycenter to reduce crossings, but keep blocks intact.
+ */
+export function layoutStrict(
+  graph: Graph,
+  focusId: string,
+  mode: Mode,
+  opts: LayoutOpts
+): Map<string, Pos> {
+  const nodeById = buildIndex(graph)
+  const { partnersByUnion, childrenByUnion } = buildUnions(graph)
+
+  const yGapGen = opts.yGapGen
+  const coupleGap = opts.coupleGap
+  const minGap = opts.minGap
+  const maxIter = opts.maxIter ?? 8
+
+  const gen = computeMemberGen(graph, focusId, mode)
+
+  // Build generation buckets for MEMBERS
+  const membersByGen = new Map<number, string[]>()
+  let maxG = 0
+  for (const n of graph.nodes) {
+    if (n.type !== 'MEMBER') continue
+    const g = gen.get(n.id) ?? 0
+    maxG = Math.max(maxG, g)
+    if (!membersByGen.has(g)) membersByGen.set(g, [])
+    membersByGen.get(g)!.push(n.id)
+  }
+  for (const [g, ids] of membersByGen.entries()) {
+    membersByGen.set(g, ids.sort((a, b) => a.localeCompare(b)))
+  }
+
+  // Helper: which unions are "active" at generation g (parents in g)
+  const unionsByGen = new Map<number, string[]>()
+  for (const [u, ps] of partnersByUnion.entries()) {
+    if (!ps.length) continue
+    const gs = ps.map(p => gen.get(p) ?? 0)
+    const g = Math.min(...gs) // parents generation
+    if (!unionsByGen.has(g)) unionsByGen.set(g, [])
+    unionsByGen.get(g)!.push(u)
+  }
+  for (const [g, us] of unionsByGen.entries()) {
+    unionsByGen.set(g, us.sort((a, b) => a.localeCompare(b)))
+  }
+
+  // Init x for members on each gen
+  const x = new Map<string, number>()
+  for (let g = 0; g <= maxG; g++) {
+    const ids = membersByGen.get(g) || []
+    ids.forEach((id, i) => x.set(id, i * minGap))
+    // center
+    const avg = ids.length ? ids.reduce((acc, id) => acc + (x.get(id) ?? 0), 0) / ids.length : 0
+    for (const id of ids) x.set(id, (x.get(id) ?? 0) - avg)
+  }
+
+  // Iterative block ordering
+  for (let it = 0; it < maxIter; it++) {
+    // TOP-DOWN: order children blocks by parent barycenter
+    for (let g = 0; g < maxG; g++) {
+      const unions = unionsByGen.get(g) || []
+      if (!unions.length) continue
+
+      // Determine desired x for each sib-block (children of union) using parent avg
+      const sibBlocks: Array<{ u: string; kids: string[]; want: number }> = []
+      for (const u of unions) {
+        const ps = partnersByUnion.get(u) || []
+        const kids = (childrenByUnion.get(u) || []).map(c => c.id)
+        if (!kids.length) continue
+        const want = ps.length
+          ? ps.reduce((acc, p) => acc + (x.get(p) ?? 0), 0) / ps.length
+          : 0
+        sibBlocks.push({ u, kids, want })
+      }
+
+      // sort blocks by want
+      sibBlocks.sort((a, b) => a.want - b.want)
+
+      // place blocks compactly in gen g+1, keep kids contiguous
+      let cursor = 0
+      const placedKids = new Set<string>()
+      for (const b of sibBlocks) {
+        // sort kids by current x to be stable
+        const kids = [...b.kids].sort((a, b2) => (x.get(a) ?? 0) - (x.get(b2) ?? 0))
+        const w = (kids.length - 1) * minGap
+        const start = cursor
+        kids.forEach((kid, i) => { x.set(kid, start + i * minGap); placedKids.add(kid) })
+        cursor = start + w + minGap
+      }
+
+      // any other members at gen g+1 not in blocks: append
+      const others = (membersByGen.get(g + 1) || []).filter(id => !placedKids.has(id))
+      for (const id of others) { x.set(id, cursor); cursor += minGap }
+
+      // recenter gen g+1
+      const idsAll = membersByGen.get(g + 1) || []
+      const avg = idsAll.length ? idsAll.reduce((acc, id) => acc + (x.get(id) ?? 0), 0) / idsAll.length : 0
+      for (const id of idsAll) x.set(id, (x.get(id) ?? 0) - avg)
+    }
+
+    // BOTTOM-UP: order couple blocks by children barycenter
+    for (let g = maxG - 1; g >= 0; g--) {
+      const unions = unionsByGen.get(g) || []
+      if (!unions.length) continue
+
+      // Each union is a couple-block (partners around union center)
+      const coupleBlocks: Array<{ u: string; ps: string[]; want: number }> = []
+      for (const u of unions) {
+        const ps = partnersByUnion.get(u) || []
+        const kids = (childrenByUnion.get(u) || []).map(c => c.id)
+        // barycenter of kids in next gen (if any)
+        const want = kids.length
+          ? kids.reduce((acc, c) => acc + (x.get(c) ?? 0), 0) / kids.length
+          : (ps.length ? ps.reduce((acc, p) => acc + (x.get(p) ?? 0), 0) / ps.length : 0)
+        coupleBlocks.push({ u, ps, want })
+      }
+      coupleBlocks.sort((a, b) => a.want - b.want)
+
+      // Place couples at gen g: union in middle, partners around; keep members compact
+      // We'll place union centers along a line, then position partners from it.
+      let cursor = 0
+      const touched = new Set<string>()
+      for (const b of coupleBlocks) {
+        const ps = b.ps
+        // width: if 2 partners => coupleGap, else spread with minGap
+        const w = ps.length <= 1 ? 0 : coupleGap
+        const center = cursor + w / 2
+        // place partners
+        if (ps.length === 1) {
+          x.set(ps[0], center); touched.add(ps[0])
+        } else if (ps.length >= 2) {
+          // first two partners symmetric; others spaced to the right (rare but safe)
+          x.set(ps[0], center - coupleGap / 2); touched.add(ps[0])
+          x.set(ps[1], center + coupleGap / 2); touched.add(ps[1])
+          for (let i = 2; i < ps.length; i++) {
+            x.set(ps[i], center + coupleGap / 2 + i * minGap); touched.add(ps[i])
+          }
+        }
+        // store union center in x map too (we'll use for final pos)
+        x.set(b.u, center)
+        cursor = center + w / 2 + minGap
+      }
+
+      // other members in gen g not touched: append
+      const idsAll = membersByGen.get(g) || []
+      const others = idsAll.filter(id => !touched.has(id))
+      for (const id of others) { x.set(id, cursor); cursor += minGap }
+
+      // recenter gen g
+      const avg = idsAll.length ? idsAll.reduce((acc, id) => acc + (x.get(id) ?? 0), 0) / idsAll.length : 0
+      for (const id of idsAll) x.set(id, (x.get(id) ?? 0) - avg)
+      // recenter unions of gen g by same offset
+      const us = unionsByGen.get(g) || []
+      for (const u of us) x.set(u, (x.get(u) ?? 0) - avg)
+    }
+  }
+
+  // Final positions (MEMBER at integer gen, UNION at gen+0.5)
+  const pos = new Map<string, Pos>()
+  for (const n of graph.nodes) {
+    if (n.type === 'MEMBER') {
+      const g = gen.get(n.id) ?? 0
+      pos.set(n.id, { x: x.get(n.id) ?? 0, y: g * yGapGen })
+    } else {
+      const ps = partnersByUnion.get(n.id) || []
+      const g = ps.length ? Math.min(...ps.map(p => gen.get(p) ?? 0)) : 0
+      // union x already set from couple placement; fallback to avg partners
+      let ux = x.get(n.id)
+      if (ux == null) {
+        ux = ps.length ? ps.reduce((acc, p) => acc + (x.get(p) ?? 0), 0) / ps.length : 0
+      }
+      pos.set(n.id, { x: ux, y: (g + 0.5) * yGapGen })
+    }
+  }
+
+  // Center focus at (0,0)
+  const start = nodeById.has(focusId) ? focusId : graph.rootMemberId
+  const f = pos.get(start) || pos.get(graph.rootMemberId)
+  if (f) {
+    for (const [id, p] of pos.entries()) {
+      pos.set(id, { x: p.x - f.x, y: p.y - f.y })
+    }
+  }
+
+  return pos
+}

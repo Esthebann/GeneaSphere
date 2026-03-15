@@ -1,13 +1,13 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { requireTokenOrRedirect } from '@/app/_lib/authClient'
 
 type User = {
   id: string
   email: string
   role: 'PENDING' | 'USER' | 'ADMIN'
   isValidated: boolean
-  createdAt?: string
 }
 
 export default function AdminPage() {
@@ -18,38 +18,33 @@ export default function AdminPage() {
   const [newRole, setNewRole] = useState<'PENDING' | 'USER' | 'ADMIN'>('USER')
 
   function token() {
-    return localStorage.getItem('geneasphere_token') || ''
+    return requireTokenOrRedirect()
   }
 
   async function load() {
     setMsg('Chargement...')
     const t = token()
-    if (!t) {
-      setMsg('Pas de token. Va sur /login')
-      setUsers([])
-      return
-    }
-    const res = await fetch('/api/admin/users', {
-      headers: { Authorization: 'Bearer ' + t }
-    })
+    if (!t) return
+
+    const res = await fetch('/api/admin/users', { headers: { Authorization: 'Bearer ' + t } })
     const data = await res.json()
     if (!res.ok) {
       setMsg('Erreur: ' + (data?.error || 'LOAD_FAILED'))
       setUsers([])
       return
     }
-    setUsers(data.users || [])
+
+    setUsers(data.users || data || [])
     setMsg('OK')
   }
 
   async function post(path: string, body: any) {
     const t = token()
+    if (!t) return null
+
     const res = await fetch(path, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + t
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + t },
       body: JSON.stringify(body)
     })
     const data = await res.json()
@@ -101,6 +96,16 @@ export default function AdminPage() {
     }
   }
 
+  async function onSeed() {
+    try {
+      setMsg('Seed démo...')
+      await post('/api/admin/seed-demo', {})
+      setMsg('Seed OK. Va sur /tree (depth 4) puis Rafraîchir.')
+    } catch (e: any) {
+      setMsg('Erreur: ' + String(e?.message || e))
+    }
+  }
+
   useEffect(() => {
     load()
   }, [])
@@ -109,8 +114,15 @@ export default function AdminPage() {
     <main style={{ maxWidth: 900, margin: '40px auto', fontFamily: 'system-ui' }}>
       <h1 style={{ fontSize: 28, marginBottom: 8 }}>Administration - Utilisateurs</h1>
       <p style={{ marginTop: 0 }}>
-        Token requis. Si besoin: <a href="/login">/login</a>
+        Liens: <a href="/">/</a> | <a href="/login">/login</a> | <a href="/members">/members</a> | <a href="/unions">/unions</a> | <a href="/tree">/tree</a>
       </p>
+
+      <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <button onClick={load} style={{ padding: 10, cursor: 'pointer' }}>Rafraîchir</button>
+        <button onClick={onSeed} style={{ padding: 10, cursor: 'pointer' }}>Seed démo (arbre complet)</button>
+      </div>
+
+      <div style={{ marginBottom: 12, whiteSpace: 'pre-wrap' }}>{msg}</div>
 
       <div style={{ padding: 12, border: '1px solid #ddd', marginBottom: 16 }}>
         <h2 style={{ fontSize: 18, marginTop: 0 }}>Créer un compte</h2>
@@ -125,9 +137,6 @@ export default function AdminPage() {
           <button type="submit" style={{ padding: 10, cursor: 'pointer' }}>Créer</button>
         </form>
       </div>
-
-      <button onClick={load} style={{ padding: 10, cursor: 'pointer', marginBottom: 12 }}>Rafraîchir</button>
-      <div style={{ marginBottom: 12, whiteSpace: 'pre-wrap' }}>{msg}</div>
 
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>

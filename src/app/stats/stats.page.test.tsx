@@ -25,6 +25,9 @@ test('stats page shows values when API returns data', async () => {
     totalMembers: 10,
     men: 6,
     women: 4,
+    other: 0,
+    avgLifeExpectancyYears: 78.5,
+    generations: 3,
     avgLifeExpectancy: 78.5,
     avgChildrenPerGeneration: 2.25,
     generationsCount: 3
@@ -32,8 +35,8 @@ test('stats page shows values when API returns data', async () => {
 
   render(<StatsPage />)
 
-  expect(await screen.findByText('Statistiques familiales')).toBeInTheDocument()
-  expect(await screen.findByText(/Nombre total de membres/)).toBeInTheDocument()
+  expect(await screen.findByText('Statistiques')).toBeInTheDocument()
+  expect(await screen.findByText(/Total membres/)).toBeInTheDocument()
   expect(await screen.findByText('10')).toBeInTheDocument()
   expect(await screen.findByText('6')).toBeInTheDocument()
   expect(await screen.findByText('4')).toBeInTheDocument()

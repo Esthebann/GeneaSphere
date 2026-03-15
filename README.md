@@ -1,36 +1,78 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Geneasphere
 
-## Getting Started
+Geneasphere est une application web full-stack permettant de créer, visualiser et gérer des arbres généalogiques de manière interactive.
 
-First, run the development server:
+🔗 **Lien de l’application :** [Accéder à l’application](https://genea-sphere-seven.vercel.app/login)
+
+## Accès démo
+
+Pour faciliter l’évaluation du projet, un compte de démonstration avec des données préchargées est disponible :
+
+- **Email :** admin@geneasphere.test
+- **Mot de passe :** demo2026
+
+## Fonctionnalités principales
+
+- création et gestion d’arbres généalogiques
+- ajout, modification et suppression de membres
+- visualisation des relations familiales
+- authentification utilisateur sécurisée
+- validation des données côté client et côté serveur
+
+## Stack technique
+
+- **Front-end :** Next.js, React, TypeScript
+- **Back-end :** API Routes Next.js, Node.js
+- **Base de données :** MongoDB avec Mongoose
+- **Authentification & sécurité :** JWT, Bcrypt
+- **Validation des données :** Zod
+- **Tests :** Jest, React Testing Library, MongoDB Memory Server
+- **Qualité de code :** ESLint
+
+## Architecture du projet
+
+Le code source principal est centralisé dans le répertoire `src/`, avec l’alias `@/*` pour simplifier les imports.  
+L’application s’appuie sur la structure de Next.js pour le routage, le rendu et la création des API.
+
+## Installation en local
+
+1. **Cloner le dépôt**
+```bash
+git clone [URL_DU_DEPOT_GITHUB]
+cd geneasphere
+````
+
+2. **Installer les dépendances**
+
+```bash
+npm install
+```
+
+3. **Configurer les variables d’environnement**
+   Créer un fichier `.env.local` à la racine du projet :
+
+```env
+MONGODB_URI=votre_chaine_de_connexion_mongodb
+JWT_SECRET=votre_cle_secrete_jwt
+```
+
+4. **Lancer le serveur de développement**
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+L’application sera accessible sur `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Tests
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Le projet inclut des tests unitaires et d’intégration. Pour les lancer :
 
-## Learn More
+```bash
+npm run test
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Objectif du projet
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Ce projet m’a permis de renforcer mes compétences en développement full-stack, en authentification sécurisée, en modélisation de données avec MongoDB et en structuration d’une application web moderne avec Next.js.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
